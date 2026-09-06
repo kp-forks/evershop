@@ -42,6 +42,7 @@ import type {
 import addOrderActivityLog from './addOrderActivityLog.js';
 import { getCarrier } from './carrier/registry.js';
 import { recomputeOrderShipmentStatus } from './recomputeOrderShipmentStatus.js';
+import { isTerminalOrderStatus } from './updateOrderStatus.js';
 
 /**
  * Payload accepted by the new createShipment service. The API stays pure —
@@ -494,6 +495,16 @@ const createShipmentImpl = async function createShipment(
     .load(readConn)) as OrderRow | null;
   if (!order) {
     throw new Error(`Order not found: ${orderUuid}`);
+  }
+
+  // Fulfillment is over for a terminal order (`closed` after a full refund, or
+  // `canceled`) — block creating new shipments. Canceling EXISTING shipments
+  // stays allowed: a terminal order stays terminal (see resolveOrderStatus
+  // precedence), so cancellation no longer trips the order-status recompute.
+  if (isTerminalOrderStatus(order.status)) {
+    throw new Error(
+      `Cannot create a shipment for an order in status "${order.status}"`
+    );
   }
 
   // Items, qty, carrier, digital-rejection.

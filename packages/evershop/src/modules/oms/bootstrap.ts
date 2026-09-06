@@ -315,13 +315,12 @@ export default () => {
         // every shipment leaves the order in `processing` so the merchant can
         // re-ship or cancel deliberately. PAYMENT-side cancellation
         // (`canceled:*`, driven by cancelOrder) is what actually cancels the
-        // order. `canceled:canceled` is explicit because resolveOrderStatus
-        // checks exact keys before `*:ship` — without it, `*:canceled` →
-        // processing would shadow `canceled:*` when cancelOrder cancels the
-        // shipments after the payment, and the no-revert guard would throw.
+        // order — and because resolveOrderStatus checks `payment:*` before
+        // `*:shipment`, `canceled:*` → canceled already out-ranks `*:canceled`
+        // → processing. No explicit `canceled:canceled` entry needed; the same
+        // precedence keeps a refunded order `closed` when its shipments change.
         '*:partially_canceled': 'processing',
         '*:canceled': 'processing',
-        'canceled:canceled': 'canceled',
         'canceled:*': 'canceled'
       },
       // Predicate → rollup output. The resolver walks these in priority order

@@ -1,6 +1,9 @@
 process.env.ALLOW_CONFIG_MUTATIONS = 'true';
 import config from 'config';
-import { resolveOrderStatus } from '../../services/updateOrderStatus.js';
+import {
+  isTerminalOrderStatus,
+  resolveOrderStatus
+} from '../../services/updateOrderStatus.js';
 
 /**
  * Regression for the partial-shipment crash. Before this fix,
@@ -23,6 +26,7 @@ const baseDefaults = {
     paymentStatus: {
       pending: { name: 'Pending', badge: 'default', isDefault: true, isCancelable: true },
       paid: { name: 'Paid', badge: 'success', isCancelable: false },
+      refunded: { name: 'Refunded', badge: 'destructive', isCancelable: false },
       canceled: { name: 'Canceled', badge: 'destructive', isCancelable: true }
     },
     status: {
@@ -40,9 +44,9 @@ const baseDefaults = {
       'paid:shipped': 'processing',
       'paid:partially_delivered': 'processing',
       'paid:delivered': 'completed',
+      'refunded:*': 'closed',
       '*:partially_canceled': 'processing',
       '*:canceled': 'processing',
-      'canceled:canceled': 'canceled',
       'canceled:*': 'canceled'
     },
     reStockAfterCancellation: true
@@ -92,16 +96,53 @@ describe('resolveOrderStatus rollup tolerance', () => {
     // The order is canceled by the PAYMENT going to `canceled` (what
     // cancelOrder does), via `canceled:*`.
     expect(resolveOrderStatus('canceled', 'pending')).toBe('canceled');
-    // Exact `canceled:canceled` protects the cancelOrder flow: it cancels the
-    // payment, then cancels the shipments (rollup → canceled). Without the
-    // exact rule, `*:canceled` → processing would shadow `canceled:*` and the
-    // no-revert guard would throw.
+    // `canceled:*` → canceled out-ranks `*:canceled` → processing on its own,
+    // because resolveOrderStatus now checks `payment:*` before `*:shipment`.
+    // No explicit `canceled:canceled` entry needed anymore.
     expect(resolveOrderStatus('canceled', 'canceled')).toBe('canceled');
+    expect(resolveOrderStatus('canceled', 'partially_canceled')).toBe(
+      'canceled'
+    );
   });
 
   it('shipment-side cancellation keeps the order processing (no auto-cancel)', () => {
     // Canceling shipments on a still-paid order must NOT cancel the order.
     expect(resolveOrderStatus('paid', 'canceled')).toBe('processing');
     expect(resolveOrderStatus('paid', 'partially_canceled')).toBe('processing');
+  });
+});
+
+describe('psoMapping precedence — payment-terminal dominates', () => {
+  // The bug this locks: canceling a shipment on a refunded (closed) order used
+  // to resolve to `processing`, because `*:canceled` was checked before
+  // `refunded:*`; then the no-revert guard threw and the cancel rolled back.
+  // Payment-wildcard now beats shipment-wildcard, so a refunded order stays
+  // closed however its shipments move.
+  it('a refunded order stays closed when a shipment is canceled', () => {
+    expect(resolveOrderStatus('refunded', 'canceled')).toBe('closed');
+    expect(resolveOrderStatus('refunded', 'partially_canceled')).toBe('closed');
+  });
+
+  it('a refunded order is closed regardless of shipment progress', () => {
+    expect(resolveOrderStatus('refunded', 'shipped')).toBe('closed');
+    expect(resolveOrderStatus('refunded', 'delivered')).toBe('closed');
+    expect(resolveOrderStatus('refunded', 'pending')).toBe('closed');
+  });
+});
+
+describe('isTerminalOrderStatus', () => {
+  it('is true for statuses with no next transitions', () => {
+    expect(isTerminalOrderStatus('closed')).toBe(true);
+    expect(isTerminalOrderStatus('canceled')).toBe(true);
+  });
+
+  it('is false for statuses that can still progress', () => {
+    expect(isTerminalOrderStatus('new')).toBe(false);
+    expect(isTerminalOrderStatus('processing')).toBe(false);
+    expect(isTerminalOrderStatus('completed')).toBe(false); // next: ['closed']
+  });
+
+  it('is false for an unknown status', () => {
+    expect(isTerminalOrderStatus('not-a-status')).toBe(false);
   });
 });

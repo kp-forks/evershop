@@ -95,11 +95,17 @@ export function resolveOrderStatus(
     );
   }
   const finalPsoMapping = getValueSync('psoMapping', psoMapping, {});
-  // Reverse the order status list to get the highest priority status first
+  // Resolution precedence: most specific first, then PAYMENT-wildcard before
+  // SHIPMENT-wildcard. Payment-specific rules out-rank shipment-wildcard rules,
+  // so terminal payment states dominate — a refunded order maps to `closed` and
+  // a canceled order to `canceled` regardless of what happens to its shipments
+  // (`<method>_refunded:*` beats `*:canceled`). Without this, canceling a
+  // shipment on a refunded order would resolve to `processing` and the no-revert
+  // guard would throw. See wiki/multi-shipment-design.md → "psoMapping precedence".
   const nextStatus =
     finalPsoMapping[`${paymentStatus}:${shipmentStatus}`] ||
-    finalPsoMapping[`*:${shipmentStatus}`] ||
     finalPsoMapping[`${paymentStatus}:*`] ||
+    finalPsoMapping[`*:${shipmentStatus}`] ||
     finalPsoMapping['*:*'];
   if (!nextStatus || !orderStatusList[nextStatus]) {
     throw new Error(
@@ -107,6 +113,28 @@ export function resolveOrderStatus(
     );
   }
   return nextStatus;
+}
+
+/**
+ * Whether an order status is terminal — no further lifecycle progression. A
+ * terminal status has an empty `next` transition list (`closed`, `canceled` in
+ * the defaults). Used to gate fulfillment actions declaratively: a shipment
+ * cannot be created for a terminal order (a fully-refunded order is `closed`; a
+ * canceled order is `canceled`). Reuses the status-flow config, so extensions
+ * that register their own terminal statuses are covered automatically.
+ */
+export function isTerminalOrderStatus(
+  status: string | null | undefined
+): boolean {
+  if (!status) {
+    return false;
+  }
+  const orderStatusList = getConfig('oms.order.status', {}) as Record<
+    string,
+    { next?: string[] }
+  >;
+  const def = orderStatusList[status];
+  return !!def && Array.isArray(def.next) && def.next.length === 0;
 }
 
 /**

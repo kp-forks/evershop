@@ -8,7 +8,6 @@ import { error } from '../../../../lib/log/logger.js';
 import { getRoutes } from '../../../../lib/router/Router.js';
 import { get } from '../../../../lib/util/get.js';
 import isDevelopmentMode from '../../../../lib/util/isDevelopmentMode.js';
-import isProductionMode from '../../../../lib/util/isProductionMode.js';
 import { getRouteBuildPath } from '../../../../lib/webpack/getRouteBuildPath.js';
 import { getEnabledWidgets } from '../../../../lib/widget/widgetManager.js';
 import { loadWidgetInstances } from '../../../cms/services/widget/loadWidgetInstances.js';
@@ -38,7 +37,14 @@ export default async (request, response, next) => {
 
       const queryPath = path.resolve(outputPath, `query-${route.id}.graphql`);
       query = outputFileSystem.readFileSync(queryPath, 'utf8');
-    } else if (isProductionMode()) {
+      // Not development → read the compiled query. Previously guarded on
+      // isProductionMode(), which left a gap: any NODE_ENV that is neither
+      // 'development' nor 'production' (a test/e2e runner, or unset) matched
+      // neither branch, so `query` stayed undefined and `next()` below (only
+      // reached inside `if (query)`) never ran — the request hung. The two real
+      // modes are the webpack dev server or a compiled build, so treat anything
+      // that is not development as the build.
+    } else {
       const routes = getRoutes();
       const route = request.currentRoute;
       const subPath = getRouteBuildPath(route);
@@ -329,6 +335,6 @@ export default async (request, response, next) => {
     }
   } catch (e) {
     error(e);
-    throw error;
+    throw e;
   }
 };

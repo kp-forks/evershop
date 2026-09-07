@@ -23,7 +23,7 @@ import { PaymentStatus, ShipmentStatus } from '../../../types/order.js';
 function getOrderStatusFlow() {
   try {
     const orderStatusList = getConfig('oms.order.status', {});
-    const orderStatuses = new Topo.Sorter();
+    const orderStatuses = new Topo.Sorter<string>();
     Object.keys(orderStatusList).forEach((status) => {
       orderStatuses.add(status, {
         before: orderStatusList[status].next,
@@ -138,6 +138,54 @@ export function isTerminalOrderStatus(
 }
 
 /**
+ * Clamp a projected order status against where the order already is, so the
+ * lifecycle only ever holds or moves forward — it never reverts and never
+ * leaves a terminal state. This is the single place order-status "memory"
+ * lives; `resolveOrderStatus` is a pure projection of (payment, shipment) and
+ * knows nothing about the order's current status.
+ *
+ * Rules, in order:
+ *   1. No current status yet (brand-new order) → accept the candidate.
+ *   2. Current status is terminal (`closed`/`canceled` — empty `next`) → keep
+ *      it. A refunded order stays `closed` however its shipments move; a
+ *      canceled order stays `canceled`.
+ *   3. Candidate sorts *before* the current status in the flow → keep current
+ *      (no revert).
+ *   4. Otherwise → adopt the candidate (forward progress).
+ *
+ * Because rules 2 and 3 return the *current* status, `changeOrderStatus`
+ * becomes a no-op instead of an error. Before this, both cases THREW — from the
+ * bootstrap `changePaymentStatus`/`changeShipmentStatus` hooks ("Order is
+ * already closed") and from `changeOrderStatus` itself ("Can not revert") — and
+ * the throw rolled back the enclosing transaction. That coupled a harmless
+ * projection result (the order status simply can't move) to a hard failure of
+ * the action the merchant actually took (cancel a shipment, record a refund).
+ * The clamp decouples them: the action commits, the order status just holds.
+ * A misconfigured `psoMapping` can no longer roll back a valid operation.
+ *
+ * @param flow  Topo-sorted order-status names, from `getOrderStatusFlow()`.
+ */
+export function clampOrderStatus(
+  candidate: string,
+  current: string | null | undefined,
+  flow: string[]
+): string {
+  if (!current) {
+    return candidate;
+  }
+  if (isTerminalOrderStatus(current)) {
+    return current;
+  }
+  // No revert: a candidate that sorts before the current status holds. Same
+  // comparison the old throw-guard used — only the reaction changed (hold, not
+  // throw). `resolveOrderStatus` validates the candidate, so both are in `flow`.
+  if (flow.indexOf(current) > flow.indexOf(candidate)) {
+    return current;
+  }
+  return candidate;
+}
+
+/**
  * This function means to be private and should not be called outside of this module. It will not perform any validation and directly update the order status.
  * You should consider updating the payment status and shipment status only, and let the system to update the order status automatically.
  *
@@ -191,12 +239,14 @@ export async function changeOrderStatus(
     throw new Error('Order not found');
   }
 
-  if (order.status === status) {
+  // Clamp the projected status against where the order already is: never leave a
+  // terminal state, never revert. A clamp that returns the current status makes
+  // this a no-op instead of throwing and rolling back the caller's transaction
+  // (the shipment change / refund that triggered the recompute). See
+  // `clampOrderStatus` and wiki/multi-shipment-design.md → "Order-status derivation".
+  const finalStatus = clampOrderStatus(status, order.status, statusFlow);
+  if (finalStatus === order.status) {
     return;
-  }
-  // Do not allow to revert the status
-  if (statusFlow.indexOf(order.status) > statusFlow.indexOf(status)) {
-    throw new Error('Can not revert the status of the order');
   }
 
   try {
@@ -206,16 +256,16 @@ export async function changeOrderStatus(
 
     await hookable(updateOrderStatus, {
       order,
-      status
-    })(order.order_id, status, connection);
+      status: finalStatus
+    })(order.order_id, finalStatus, connection);
 
     await hookable(addOrderStatusChangeEvents, {
       order,
-      status
+      status: finalStatus
     })(
       order.order_id,
       order.status ? order.status.toString() : 'unknown',
-      status,
+      finalStatus,
       connection
     );
 

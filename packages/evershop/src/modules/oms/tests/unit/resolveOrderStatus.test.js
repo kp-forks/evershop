@@ -1,6 +1,7 @@
 process.env.ALLOW_CONFIG_MUTATIONS = 'true';
 import config from 'config';
 import {
+  clampOrderStatus,
   isTerminalOrderStatus,
   resolveOrderStatus
 } from '../../services/updateOrderStatus.js';
@@ -144,5 +145,44 @@ describe('isTerminalOrderStatus', () => {
 
   it('is false for an unknown status', () => {
     expect(isTerminalOrderStatus('not-a-status')).toBe(false);
+  });
+});
+
+// A representative topo-sorted flow (see baseDefaults.status). Terminal
+// statuses sort last; the exact order between `closed` and `canceled` doesn't
+// matter to these cases — the terminal-sticky rule short-circuits first.
+const FLOW = ['new', 'processing', 'completed', 'closed', 'canceled'];
+
+describe('clampOrderStatus (Stage 2 — lifecycle clamp)', () => {
+  it('accepts the candidate for a brand-new order (no current status)', () => {
+    expect(clampOrderStatus('new', null, FLOW)).toBe('new');
+    expect(clampOrderStatus('processing', undefined, FLOW)).toBe('processing');
+  });
+
+  it('moves the status forward', () => {
+    expect(clampOrderStatus('processing', 'new', FLOW)).toBe('processing');
+    expect(clampOrderStatus('completed', 'processing', FLOW)).toBe('completed');
+  });
+
+  it('holds current on a revert — the status never goes backward', () => {
+    expect(clampOrderStatus('processing', 'completed', FLOW)).toBe('completed');
+    expect(clampOrderStatus('new', 'processing', FLOW)).toBe('processing');
+  });
+
+  it('keeps a terminal order terminal — the refund/cancel bug class', () => {
+    // A refunded order is `closed`; canceling a shipment re-projects to
+    // `processing`. The old code threw "Order is already closed" and rolled
+    // back the cancel. The clamp holds `closed`, so the cancel commits.
+    expect(clampOrderStatus('processing', 'closed', FLOW)).toBe('closed');
+    expect(clampOrderStatus('completed', 'closed', FLOW)).toBe('closed');
+    expect(clampOrderStatus('processing', 'canceled', FLOW)).toBe('canceled');
+    expect(clampOrderStatus('new', 'canceled', FLOW)).toBe('canceled');
+  });
+
+  it('is a no-op when the candidate equals the current status', () => {
+    expect(clampOrderStatus('processing', 'processing', FLOW)).toBe(
+      'processing'
+    );
+    expect(clampOrderStatus('closed', 'closed', FLOW)).toBe('closed');
   });
 });
